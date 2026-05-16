@@ -1,15 +1,15 @@
-# LUC-Open-LIN
+## LUC-Open-LIN
 
 It is a more comprehensive fork of https://github.com/uCAN-LIN/LinUSBConverter
 
-Enhancments:
+# Common Enhancements
 
-Enhanded Checksum ID = 0x00 - 0x3f 
-Classic Checksum ID = 0x80 - 0xBF
+Enhanced checksum ID = 0x00 - 0x3f 
+Classic checksum ID = 0x80 - 0xBF
 
-# Monitormode
+# Monitor mode
 
-Delivers inclusive Checksum
+Delivers including Checksum
 
 l #Open in Monitor-Modus
 
@@ -21,3 +21,5 @@ t0a05ef01000000 #Transmit 0x20 with Classic Checksum = 0xA0 Len:5 Data: EF 01 00
 z #Accepted
 t0200 #No Response Data
 
+Everything else is as usual
+see https://ucandevices.github.io/ulc.html
