@@ -129,16 +129,14 @@ void PendSV_Handler(void)
 void SysTick_Handler(void)
 {
   /* USER CODE BEGIN SysTick_IRQn 0 */
-	  extern uint32_t slcan_lin_timeout_counter ;
+
   /* USER CODE END SysTick_IRQn 0 */
   HAL_IncTick();
   /* USER CODE BEGIN SysTick_IRQn 1 */
-  slCanHandler(1);
-
-  if ((slcan_lin_timeout_counter != 0) && (HAL_GetTick() - slcan_lin_timeout_counter > 3))
-  {
-	  lin_slcan_rx_timeout_handler();
-  }
+  /* Hier wird nur gezaehlt. Der LIN-Master-Schedule und der Empfangs-Timeout
+   * laufen in slCanServiceLin() in der Mainloop - sonst blockiert das
+   * blockierende HAL_UART_Transmit den Tick, den UART-Empfang und den USB. */
+  slCanTickIsr();
   /* USER CODE END SysTick_IRQn 1 */
 }
 

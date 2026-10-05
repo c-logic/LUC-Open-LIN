@@ -3,6 +3,16 @@
  *
  *  Created on: Apr 2, 2016
  *      Author: Vostro1440
+ *
+ *  2026: Entkopplung von Interrupt- und Mainloop-Kontext.
+ *  - USB-Empfang: der USB-ISR legt nur Bytes in rx_ring ab, die Zeilenauswertung
+ *    laeuft komplett in der Mainloop (slCanCheckCommand).
+ *  - USB-Senden: Erzeuger (auch ISRs) schreiben fertige Zeilen atomar in tx_ring,
+ *    gesendet wird ausschliesslich aus der Mainloop (slCanOutputPump). Es gibt
+ *    keine Warteschleife auf USB mehr in irgendeinem Interrupt.
+ *  - LIN-Master-Schedule: SysTick zaehlt nur (slCanTickIsr), gearbeitet wird in
+ *    der Mainloop (slCanServiceLin). Damit blockiert das blockierende
+ *    HAL_UART_Transmit nicht mehr Tick, UART-Empfang und USB.
  */
 
 #include "slcan.h"
@@ -19,57 +29,151 @@
 #define SLCAN_CR 13
 #define SLCAN_LR 10
 
-extern int32_t serialNumber;
+/* Ringpuffergroessen, jeweils Zweierpotenz */
+#define SLCAN_RX_RING_SIZE 128u
+#define SLCAN_TX_RING_SIZE 256u
+
+/* laengste Ausgabezeile: 't' + Kompatibilitaets-Nibble + 2 Hex Id + Nibble Len
+ * + 9 * 2 Hex Daten/Checksumme + Terminator */
+#define SLCAN_LINE_OUT_MAX 24u
+
+/* Statusflags fuer das 'F'-Kommando (slcan: Bit 3 = data overrun) */
+#define SLCAN_FLAG_DATA_OVERRUN 0x08u
+
+extern uint32_t serialNumber;
 
 void RebootToBootloader();
-uint8_t slcan_state = SLCAN_STATE_CONFIG;
-LinType_t lin_type = LIN_MONITOR;
+volatile uint8_t slcan_state = SLCAN_STATE_CONFIG;
+volatile LinType_t lin_type = LIN_MONITOR;
 static uint8_t terminator = SLCAN_CR;
 
 extern USBD_HandleTypeDef hUsbDeviceFS;
 
-uint8_t sl_frame[LINE_MAXLEN];
-uint8_t sl_frame_len=0;
+/* ------------------------------------------------------------------------- */
+/* USB -> Geraet: beschrieben im USB-ISR, gelesen in der Mainloop            */
+/* ------------------------------------------------------------------------- */
+static volatile uint8_t  rx_ring[SLCAN_RX_RING_SIZE];
+static volatile uint16_t rx_head = 0;
+static volatile uint16_t rx_tail = 0;
+
+/* ------------------------------------------------------------------------- */
+/* Geraet -> USB: beschrieben von Mainloop und ISRs,                          */
+/*                gesendet ausschliesslich aus der Mainloop                   */
+/* ------------------------------------------------------------------------- */
+static volatile uint8_t  tx_ring[SLCAN_TX_RING_SIZE];
+static volatile uint16_t tx_head = 0;
+static volatile uint16_t tx_tail = 0;
+
+/* gesetzt, wenn ein Ringpuffer uebergelaufen ist; wird von 'F' gemeldet */
+static volatile uint8_t slcan_overrun = 0;
+
+/* vom SysTick hochgezaehlte, noch nicht verarbeitete Millisekunden */
+static volatile uint8_t lin_ms_pending = 0;
+
 /**
-  * @brief  Adds data to send buffer
-  * @param  c - data to add
-  * @retval None
+  * @brief  Zustand beim Zusammenbauen einer Ausgabezeile
   */
-static void slcanSetOutputChar(uint8_t c)
+typedef struct {
+	uint8_t *buf;
+	uint8_t len;
+	uint8_t cap;
+} sl_line_t;
+
+static void sl_putc(sl_line_t *l, uint8_t c)
 {
-	if (sl_frame_len < sizeof(sl_frame))
+	if (l->len < l->cap)
 	{
-		sl_frame[sl_frame_len] = c;
-		sl_frame_len ++;
+		l->buf[l->len] = c;
+		l->len++;
 	}
 }
 
 /**
-  * @brief  Add given nible value as hexadecimal string to bufferr
-  * @param  c - data to add
-  * @retval None
+  * @brief  Nibble als Hexziffer anhaengen
   */
-static void slCanSendNibble(uint8_t ch)
+static void sl_put_nibble(sl_line_t *l, uint8_t ch)
 {
-	ch = ch > 9 ? ch - 10 + 'A' : ch + '0';
-	slcanSetOutputChar(ch);
+	sl_putc(l, (uint8_t)(ch > 9u ? (ch - 10u + (uint8_t)'A') : (ch + (uint8_t)'0')));
 }
 
 /**
-  * @brief  Add given byte value as hexadecimal string to buffer
-  * @param  value - data to add
-  * @retval None
+  * @brief  Byte als zwei Hexziffern anhaengen
   */
-static void slcanSetOutputAsHex(uint8_t ch) {
-	slCanSendNibble(ch >> 4);
-	slCanSendNibble(ch & 0x0F);
+static void sl_put_hex(sl_line_t *l, uint8_t ch)
+{
+	sl_put_nibble(l, (uint8_t)(ch >> 4));
+	sl_put_nibble(l, (uint8_t)(ch & 0x0Fu));
 }
 
-static void slcanOutputFlush(void)
+/**
+  * @brief  Fertige Zeile atomar in den Sende-Ringpuffer uebernehmen.
+  *         Passt sie nicht komplett hinein, wird sie komplett verworfen -
+  *         so entstehen keine halben Zeilen auf der Leitung.
+  */
+static void sl_commit(const sl_line_t *l)
 {
-	while (((USBD_CDC_HandleTypeDef*)hUsbDeviceFS.pClassData)->TxState){;} //should change by hardware
-	while (CDC_Transmit_FS(sl_frame, sl_frame_len) != USBD_OK);
-    sl_frame_len = 0;
+	uint32_t primask = __get_PRIMASK();
+	uint16_t used;
+
+	__disable_irq();
+	used = (uint16_t)(tx_head - tx_tail);
+	if ((uint16_t)(SLCAN_TX_RING_SIZE - used) >= (uint16_t)l->len)
+	{
+		uint8_t i;
+		for (i = 0u; i < l->len; i++)
+		{
+			tx_ring[(uint16_t)(tx_head + i) & (SLCAN_TX_RING_SIZE - 1u)] = l->buf[i];
+		}
+		tx_head = (uint16_t)(tx_head + l->len);
+	} else
+	{
+		slcan_overrun = 1u;
+	}
+	__set_PRIMASK(primask);
+}
+
+/**
+  * @brief  Ein USB-Paket aus dem Ringpuffer absenden.
+  *         Nur aus der Mainloop aufrufen. Blockiert nicht.
+  */
+void slCanOutputPump(void)
+{
+	USBD_CDC_HandleTypeDef *hcdc;
+	uint16_t used;
+	uint16_t off;
+	uint16_t chunk;
+
+	if (hUsbDeviceFS.dev_state != USBD_STATE_CONFIGURED)
+		return;
+	hcdc = (USBD_CDC_HandleTypeDef*) hUsbDeviceFS.pClassData;
+	if (hcdc == 0)
+		return;
+	if (hcdc->TxState != 0u)
+		return; /* vorheriges Paket noch unterwegs */
+
+	used = (uint16_t)(tx_head - tx_tail);
+	if (used == 0u)
+		return;
+
+	/* nur bis zum Ringende senden, dann braucht es keine Kopie */
+	off = (uint16_t)(tx_tail & (SLCAN_TX_RING_SIZE - 1u));
+	chunk = (uint16_t)(SLCAN_TX_RING_SIZE - off);
+	if (chunk > used)
+		chunk = used;
+	if (chunk > CDC_DATA_FS_MAX_PACKET_SIZE)
+		chunk = CDC_DATA_FS_MAX_PACKET_SIZE;
+
+	if (CDC_Transmit_FS((uint8_t*) &tx_ring[off], (uint16_t) chunk) == USBD_OK)
+		tx_tail = (uint16_t)(tx_tail + chunk);
+}
+
+/**
+  * @brief  LIN-Zeitbasis. Wird aus dem SysTick aufgerufen und zaehlt nur.
+  */
+void slCanTickIsr(void)
+{
+	if (lin_ms_pending < 255u)
+		lin_ms_pending++;
 }
 
 void slCanHandler(uint8_t time_passed_ms)
@@ -81,27 +185,74 @@ void slCanHandler(uint8_t time_passed_ms)
     }
 }
 
+extern uint32_t lin_baund_rate;
+
 /**
-  * @brief  Add to input buffer data from interfaces
-  * @param  ch - data to add
-  * @retval None
+  * @brief  Empfangs-Timeout in ms, abhaengig von der Baudrate.
+  *         Etwa vier Zeichenzeiten (40 Bit), mindestens 2 ms.
+  *         19200 Bd -> 3 ms, 9600 Bd -> 5 ms.
   */
-static uint8_t command[LINE_MAXLEN];
+static uint32_t lin_rx_timeout_ms(void)
+{
+	uint32_t ms = (40000u + lin_baund_rate - 1u) / lin_baund_rate;
+	return (ms < 2u) ? 2u : ms;
+}
+
+/**
+  * @brief  LIN-Zeitscheibe abarbeiten. Nur aus der Mainloop aufrufen.
+  *         Hier laufen die blockierenden HAL_UART_Transmit-Aufrufe des
+  *         Master-Schedules - bewusst ausserhalb jedes Interrupts.
+  */
+void slCanServiceLin(void)
+{
+	uint32_t primask;
+	uint8_t ms;
+
+	primask = __get_PRIMASK();
+	__disable_irq();
+	ms = lin_ms_pending;
+	lin_ms_pending = 0u;
+	__set_PRIMASK(primask);
+
+	if (ms == 0u)
+		return;
+
+	slCanHandler(ms);
+
+	/* Der Timeout-Handler fasst denselben Zustand an wie lin_slcan_monitor_rx()
+	 * in der USART1-ISR. Deshalb Pruefung und Auswertung zusammen unter
+	 * gesperrten Interrupts - das dauert nur wenige Mikrosekunden, also
+	 * deutlich weniger als eine Zeichenzeit. */
+	if (slcan_lin_timeout_counter != 0u)
+	{
+		primask = __get_PRIMASK();
+		__disable_irq();
+		if ((slcan_lin_timeout_counter != 0u)
+				&& ((HAL_GetTick() - slcan_lin_timeout_counter) > lin_rx_timeout_ms()))
+		{
+			lin_slcan_rx_timeout_handler();
+		}
+		__set_PRIMASK(primask);
+	}
+}
+
+/**
+  * @brief  Byte aus dem USB-Interrupt annehmen. Macht nur noch das Einreihen,
+  *         die Auswertung passiert in slCanCheckCommand().
+  * @param  ch - empfangenes Zeichen
+  * @retval immer 0
+  */
 int slCanProccesInput(uint8_t ch)
 {
-	static uint8_t line[LINE_MAXLEN];
-	static uint8_t linepos = 0;
-
-    if (ch == SLCAN_CR) {
-        line[linepos] = 0;
-        memcpy(command,line,linepos);
-        linepos = 0;
-        return 1;
-    } else if (ch != SLCAN_LR) {
-        line[linepos] = ch;
-        if (linepos < LINE_MAXLEN - 1) linepos++;
-    }
-    return 0;
+	if ((uint16_t)(rx_head - rx_tail) < SLCAN_RX_RING_SIZE)
+	{
+		rx_ring[rx_head & (SLCAN_RX_RING_SIZE - 1u)] = ch;
+		rx_head++;
+	} else
+	{
+		slcan_overrun = 1u;
+	}
+	return 0;
 }
 
 
@@ -144,7 +295,8 @@ static uint8_t transmitStd(uint8_t* line, uint8_t classicChecksum) {
     bool lin_data = ((line[0] == 't') || (line[0] == 'T'));
 
     slot.data_ptr = data_buff;
-    slot.checksum_type = classicChecksum;
+    slot.checksum_type = classicChecksum ?
+    		OPEN_LIN_CHECKSUM_TYPE_CLASSIC : OPEN_LIN_CHECKSUM_TYPE_EXTENDED;
     if (line[0] < 'Z')
 		offset = 5;
     // id
@@ -173,7 +325,7 @@ static uint8_t transmitStd(uint8_t* line, uint8_t classicChecksum) {
     	open_lin_master_data_tx_data(&slot);
     }
     /* set data recepcion state machine */
-	lin_slcan_skip_header_reception(slot.pid);
+	lin_slcan_skip_header_reception(slot.pid, slot.checksum_type);
 
     return 1;
 }
@@ -185,16 +337,18 @@ static uint8_t transmitStd(uint8_t* line, uint8_t classicChecksum) {
  * @retval None
  */
 extern void MX_USART1_UART_Init(void);
-extern uint32_t lin_baund_rate;
 
-void slCanCheckCommand()
+static void slcan_execute(uint8_t *line)
 {
+	uint8_t outbuf[16];
+	sl_line_t out;
 	uint8_t result = SLCAN_BELL;
-	uint8_t *line = command;
+
+	out.buf = outbuf;
+	out.len = 0u;
+	out.cap = (uint8_t) sizeof(outbuf);
 
     switch (line[0]) {
-    	case 0:
-    		return;
     	case 'a':
     	{
     		if (terminator == SLCAN_CR)
@@ -221,32 +375,39 @@ void slCanCheckCommand()
         	result = terminator;
         	break;
         case 'F': // Read status flags
+        	/* Antwort bewusst unveraendert (nur Terminator), damit sich das
+        	 * Protokoll gegenueber dem Host nicht aendert. Wer die Ringpuffer-
+        	 * Ueberlaeufe auswerten will, kommentiert die drei Zeilen ein:
+        	 *   sl_putc(&out, 'F');
+        	 *   sl_put_hex(&out, slcan_overrun ? SLCAN_FLAG_DATA_OVERRUN : 0u);
+        	 *   slcan_overrun = 0u;
+        	 * (slcan: Bit 3 = data overrun) */
       		result = terminator;
             break;
         case 'V': // Get hardware version
             {
-                slcanSetOutputChar('V');
-//                slcanSetOutputAsHex(VERSION_HARDWARE_MAJOR);
-                slcanSetOutputAsHex(VERSION_HARDWARE_MINOR);
+                sl_putc(&out, 'V');
+//                sl_put_hex(&out, VERSION_HARDWARE_MAJOR);
+                sl_put_hex(&out, VERSION_HARDWARE_MINOR);
                 result = terminator;
             }
             break;
         case 'v': // Get firmware version
             {
-                slcanSetOutputChar('v');
-                slcanSetOutputAsHex(VERSION_FIRMWARE_MAJOR);
-                slcanSetOutputAsHex(VERSION_FIRMWARE_MINOR);
+                sl_putc(&out, 'v');
+                sl_put_hex(&out, VERSION_FIRMWARE_MAJOR);
+                sl_put_hex(&out, VERSION_FIRMWARE_MINOR);
                 result = terminator;
             }
             break;
         case 'N': // Get serial number
             {
 
-                slcanSetOutputChar('N');
-                slcanSetOutputAsHex((uint8_t)(serialNumber));
-                slcanSetOutputAsHex((uint8_t)(serialNumber>>8));
-                slcanSetOutputAsHex((uint8_t)(serialNumber>>16));
-                slcanSetOutputAsHex((uint8_t)(serialNumber>>24));
+                sl_putc(&out, 'N');
+                sl_put_hex(&out, (uint8_t)(serialNumber));
+                sl_put_hex(&out, (uint8_t)(serialNumber>>8));
+                sl_put_hex(&out, (uint8_t)(serialNumber>>16));
+                sl_put_hex(&out, (uint8_t)(serialNumber>>24));
                 result = terminator;
             }
             break;
@@ -288,6 +449,7 @@ void slCanCheckCommand()
         case 'r': // Transmit header
         case 'T':
         case 't': // Transmit full frame
+        {
             // shame on you that you put this code here ...
         	uint8_t classicChecksum = 0;
         	if(line[2]=='8' || line[2]=='9') {
@@ -304,9 +466,9 @@ void slCanCheckCommand()
 				case LIN_SLAVE:
 	                if (addLinMasterRow(line, classicChecksum) == 1){
 	                	if (line[0] < 'Z')
-	                		slcanSetOutputChar('Z');
+	                		sl_putc(&out, 'Z');
 	                	else
-	                		slcanSetOutputChar('z');
+	                		sl_putc(&out, 'z');
 	                }
 	                result = terminator;
 					break;
@@ -315,9 +477,9 @@ void slCanCheckCommand()
 	                {
 	                    if (transmitStd(line, classicChecksum) == 1) {
 	                        if (line[0] < 'Z')
-	                        	slcanSetOutputChar('Z');
+	                        	sl_putc(&out, 'Z');
 	                        else
-	                        	slcanSetOutputChar('z');
+	                        	sl_putc(&out, 'z');
 	                        result = terminator;
 	                    }
 	                }
@@ -326,6 +488,9 @@ void slCanCheckCommand()
 					break;
         	}
             break;
+        }
+        default:
+        	break;
     }
 
     if ((line[0] == 'b') && (line[1] == 'o') && (line[2] == 'o') && (line[3] == 't'))
@@ -333,9 +498,44 @@ void slCanCheckCommand()
     	//RebootToBootloader();
     }
 
-   line[0] = 0;
-   slcanSetOutputChar(result);
-   slcanOutputFlush();
+	sl_putc(&out, result);
+	sl_commit(&out);
+}
+
+/**
+  * @brief  Empfangene USB-Bytes zu Zeilen zusammensetzen und ausfuehren.
+  *         Nur aus der Mainloop aufrufen. Der Zeilenpuffer wird ausschliesslich
+  *         hier benutzt, damit gibt es keinen Wettlauf mit dem USB-Interrupt.
+  *
+  *         Multiline-kompatibel: CR, LF und CRLF (bzw. LFCR) werden alle als
+  *         Zeilenende akzeptiert, ebenso mehrere Befehle in einem USB-Paket.
+  *         Eine leere Zeile (z.B. das LF nach dem CR bei CRLF) wird uebersprungen,
+  *         erzeugt also keinen zweiten, leeren Befehl.
+  */
+void slCanCheckCommand(void)
+{
+	static uint8_t line[LINE_MAXLEN];
+	static uint8_t linepos = 0;
+
+	while (rx_tail != rx_head)
+	{
+		uint8_t ch = rx_ring[rx_tail & (SLCAN_RX_RING_SIZE - 1u)];
+		rx_tail++;
+
+		if ((ch == SLCAN_CR) || (ch == SLCAN_LR))
+		{
+			/* Zeilenende - egal ob CR, LF oder eine beliebige Kombination */
+			line[linepos] = 0;
+			linepos = 0;
+			if (line[0] != 0)
+				slcan_execute(line);
+		} else
+		{
+			line[linepos] = ch;
+			if (linepos < (LINE_MAXLEN - 1u))
+				linepos++;
+		}
+	}
 }
 
 
@@ -347,24 +547,24 @@ void slCanCheckCommand()
  */
 uint8_t slcanReciveCanFrame(open_lin_frame_slot_t *pRxMsg)
 {
+	uint8_t buf[SLCAN_LINE_OUT_MAX];
+	sl_line_t out;
 	uint8_t i;
-	open_lin_pid_t pid;
+	uint8_t len = (uint8_t) pRxMsg->data_length;
 
-    slcanSetOutputChar('t');
+	out.buf = buf;
+	out.len = 0u;
+	out.cap = (uint8_t) sizeof(buf);
 
-    pid = pRxMsg->pid & 0x3F;
-
-    slCanSendNibble(0); // for slcan compatibility
-    slcanSetOutputAsHex(pid);
-	slCanSendNibble(pRxMsg->data_length);
-	if (pRxMsg->data_length > 0)
+	sl_putc(&out, 't');
+	sl_put_nibble(&out, 0); // for slcan compatibility
+	sl_put_hex(&out, (uint8_t)(pRxMsg->pid & 0x3Fu));
+	sl_put_nibble(&out, len);
+	for (i = 0u; i < len; i++)
 	{
-		for (i = 0;  i != pRxMsg->data_length; i ++) {
-			slcanSetOutputAsHex(pRxMsg->data_ptr[i]);
-		}
+		sl_put_hex(&out, pRxMsg->data_ptr[i]);
 	}
-	slcanSetOutputChar(terminator);
-	slcanOutputFlush();
+	sl_putc(&out, terminator);
+	sl_commit(&out);
 	return 0;
 }
-

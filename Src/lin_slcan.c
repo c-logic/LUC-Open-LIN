@@ -1,4 +1,5 @@
 #include "slcan.h"
+#include "lin_slcan.h"
 
 #include <stdbool.h>
 #include <string.h>
@@ -13,15 +14,31 @@ uint8_t lin_master_data[MAX_SLAVES_COUNT * 8];
 t_master_frame_table_item master_frame_table[MAX_SLAVES_COUNT];
 uint8_t master_frame_table_size = 0;
 
+extern uint32_t lin_baund_rate;
+
+/**
+  * @brief  Zeile zu einer Id suchen oder anlegen.
+  * @param  id        Id (0..0x3F)
+  * @param  out_index Index der Zeile, -1 wenn die Tabelle voll ist
+  * @retval Zeiger auf die Zeile, 0 wenn die Tabelle voll ist
+  */
 t_master_frame_table_item* slcan_get_master_table_row(open_lin_pid_t id,
 		int8_t *out_index) {
-	uint8_t i = -1;
-	for (i = 0; i < master_frame_table_size; i++) {
+	uint8_t i;
+
+	for (i = 0u; i < master_frame_table_size; i++) {
 		if (id == master_frame_table[i].slot.pid) {
-			break;
+			*out_index = (int8_t) i;
+			return &master_frame_table[i];
 		}
 	}
-	(*out_index) = i;
+
+	/* nicht gefunden: neue Zeile, aber nur wenn noch Platz ist */
+	if (master_frame_table_size >= MAX_SLAVES_COUNT) {
+		*out_index = -1;
+		return 0;
+	}
+	*out_index = (int8_t) i; /* == master_frame_table_size */
 	return &master_frame_table[i];
 }
 
@@ -34,8 +51,6 @@ t_master_frame_table_item* slcan_get_master_table_row(open_lin_pid_t id,
 
 //T013151502AA55
 //t0163112233
-void open_lin_net_init(open_lin_frame_slot_t *a_slot_array,
-		l_u8 a_slot_array_len);
 
 uint8_t addLinMasterRow(uint8_t *line, uint8_t classicChecksum) {
 	uint32_t temp;
@@ -70,7 +85,9 @@ uint8_t addLinMasterRow(uint8_t *line, uint8_t classicChecksum) {
 
 	temp &= 0x3f;
 	int8_t out_index;
-	array_ptr = slcan_get_master_table_row(temp, &out_index);
+	array_ptr = slcan_get_master_table_row((open_lin_pid_t) temp, &out_index);
+	if (array_ptr == 0)
+		return 0; /* Tabelle voll (MAX_SLAVES_COUNT Zeilen) -> BELL */
 	array_ptr->slot.pid = temp;
 	if ((temp == 0x3d) || (temp == 0x3c)) {
 //    	extern l_u8 diagnostic_slot;
@@ -107,9 +124,12 @@ uint8_t addLinMasterRow(uint8_t *line, uint8_t classicChecksum) {
 		array_ptr->response_wait_ms = temp;
 	} else {
 		array_ptr->offset_ms = 15;
-		// timeout
-		tFrame_Max_ms = (((uint16_t) array_ptr->slot.data_length * 10U + 44U)
-				* 7U / 100U) + 1;
+		/* timeout: T_Frame_Maximum = 1.4 * (10*(len+1) + 34) Bitzeiten,
+		 * umgerechnet auf die aktuelle Baudrate, plus 1 ms Reserve */
+		tFrame_Max_ms = (uint16_t)((((uint32_t) array_ptr->slot.data_length * 10u
+				+ 44u) * 14u * 1000u) / (10u * lin_baund_rate)) + 1u;
+		if (tFrame_Max_ms > 255u)
+			tFrame_Max_ms = 255u;
 		array_ptr->response_wait_ms = (uint8_t) (tFrame_Max_ms);
 	}
 
@@ -121,7 +141,7 @@ uint8_t addLinMasterRow(uint8_t *line, uint8_t classicChecksum) {
 		}
 	}
 
-	if ((out_index == master_frame_table_size)
+	if ((out_index == (int8_t) master_frame_table_size)
 			&& (master_frame_table_size < MAX_SLAVES_COUNT))
 		master_frame_table_size++;
 
@@ -132,12 +152,24 @@ static t_open_lin_slave_state slcan_lin_slave_state;
 static l_u8 slcan_lin_slave_state_data_count;
 static uint8_t slcan_lin_data_array[9];
 static t_open_lin_data_layer_frame open_lin_data_layer_frame;
-uint32_t slcan_lin_timeout_counter = 0;
+volatile uint32_t slcan_lin_timeout_counter = 0;
+
+/**
+  * @brief  Timeout scharf machen. 0 bedeutet "kein Timeout aktiv", deshalb wird
+  *         ein Tick-Wert von 0 auf 1 gezogen.
+  */
+static void lin_slcan_arm_timeout(void)
+{
+	uint32_t t = HAL_GetTick();
+	slcan_lin_timeout_counter = (t == 0u) ? 1u : t;
+}
 
 void lin_slcan_reset(void) {
 	slcan_lin_slave_state = OPEN_LIN_SLAVE_IDLE;
 	slcan_lin_slave_state_data_count = 0;
 	slcan_lin_timeout_counter = 0;
+	/* data_ptr darf nie 0 sein - sonst schreibt der DATA_RX-Zweig auf Adresse 0 */
+	open_lin_data_layer_frame.data_ptr = slcan_lin_data_array;
 //	open_lin_hw_reset();
 }
 
@@ -151,10 +183,11 @@ void lin_slcan_rx_handler(t_open_lin_data_layer_frame *f) {
 }
 
 void open_lin_on_rx_frame(open_lin_frame_slot_t *slot) {
-	slcanReciveCanFrame(slot);
+	if (slot != OPEN_LIN_NET_SLOT_EMPTY)
+		slcanReciveCanFrame(slot);
 }
 
-void lin_slcan_rx_timeout_handler() {
+void lin_slcan_rx_timeout_handler(void) {
 	if (slcan_state == SLCAN_STATE_OPEN) {
 		if (slcan_lin_slave_state_data_count == 0) {
 			/* header send no respone */
@@ -168,7 +201,7 @@ void lin_slcan_rx_timeout_handler() {
 			} else {
 				open_lin_data_layer_frame.lenght = slcan_lin_slave_state_data_count - 1;
 				l_u8 cs=open_lin_data_layer_checksum(open_lin_data_layer_frame.pid, open_lin_data_layer_frame.lenght, open_lin_data_layer_frame.data_ptr, open_lin_data_layer_frame.checksumtype);
-				if (slcan_lin_data_array[open_lin_data_layer_frame.lenght] == cs) {/* TODO remove from interrupt possible function */
+				if (slcan_lin_data_array[open_lin_data_layer_frame.lenght] == cs) {
 					/* valid checksum */
 					lin_slcan_rx_handler(&open_lin_data_layer_frame);
 				}
@@ -178,13 +211,17 @@ void lin_slcan_rx_timeout_handler() {
 	lin_slcan_reset();
 }
 
-void lin_slcan_skip_header_reception(uint8_t pid) {
-	open_lin_hw_reset();
+void lin_slcan_skip_header_reception(uint8_t pid, open_lin_checksum_type_t cs_type) {
+	/* Frueher stand hier open_lin_hw_reset() (= volles HAL_LIN_Init). Das dauert
+	 * ~100-200 us und lag genau vor dem Empfangsfenster, hat also die ersten
+	 * Antwortbytes verschluckt. Das leichtgewichtige Scharfmachen genuegt. */
+	open_lin_set_rx_enabled(l_true);
 	lin_slcan_reset();
 	slcan_lin_slave_state = OPEN_LIN_SLAVE_DATA_RX;
 	open_lin_data_layer_frame.pid = pid;
 	open_lin_data_layer_frame.data_ptr = slcan_lin_data_array;
-	slcan_lin_timeout_counter = HAL_GetTick();
+	open_lin_data_layer_frame.checksumtype = cs_type;
+	lin_slcan_arm_timeout();
 }
 
 void lin_slcan_monitor_rx(l_u8 rx_byte) {
@@ -209,20 +246,25 @@ void lin_slcan_monitor_rx(l_u8 rx_byte) {
 		case (OPEN_LIN_SLAVE_PID_RX): {
 			if (rx_byte == 0)
 				break;
-			if (open_lin_data_layer_parity(rx_byte) == rx_byte) {
-				open_lin_data_layer_frame.pid = (open_lin_pid_t) (rx_byte
-						& OPEN_LIN_ID_MASK);
-				open_lin_data_layer_frame.data_ptr = slcan_lin_data_array;
-			} else {
+			if (open_lin_data_layer_parity(rx_byte) != rx_byte) {
+				/* Paritaetsfehler: Frame verwerfen und auf den naechsten Break
+				 * warten. Vorher lief der Code hier weiter in DATA_RX und hat
+				 * das Frame mit der Id des Vorgaengers gemeldet. */
 				lin_slcan_reset();
+				break;
 			}
+			open_lin_data_layer_frame.pid = (open_lin_pid_t) (rx_byte
+					& OPEN_LIN_ID_MASK);
+			open_lin_data_layer_frame.data_ptr = slcan_lin_data_array;
+			open_lin_data_layer_frame.checksumtype =
+					OPEN_LIN_CHECKSUM_TYPE_EXTENDED;
 			slcan_lin_slave_state = OPEN_LIN_SLAVE_DATA_RX;
-			// slcan_lin_timeout handled in sys timer interrupt function
-			slcan_lin_timeout_counter = HAL_GetTick();
+			// slcan_lin_timeout handled in slCanServiceLin()
+			lin_slcan_arm_timeout();
 		}
 			break;
 		case (OPEN_LIN_SLAVE_DATA_RX): {
-			slcan_lin_timeout_counter = HAL_GetTick();
+			lin_slcan_arm_timeout();
 			if (slcan_lin_slave_state_data_count < 8) {
 				open_lin_data_layer_frame.data_ptr[slcan_lin_slave_state_data_count] =
 						rx_byte;
@@ -232,16 +274,7 @@ void lin_slcan_monitor_rx(l_u8 rx_byte) {
 						rx_byte;
 				slcan_lin_slave_state_data_count++;
 				open_lin_data_layer_frame.lenght = slcan_lin_slave_state_data_count;
-				/* checksum calculation */
-//						if ( lin_type != LIN_MONITOR) {
-//							if (rx_byte == open_lin_data_layer_checksum(open_lin_data_layer_frame.pid & OPEN_LIN_ID_MASK, open_lin_data_layer_frame.lenght, open_lin_data_layer_frame.data_ptr)) { /* TODO remove from interrupt possible function */
-//								/* valid checksum */
-//								lin_slcan_rx_handler(&open_lin_data_layer_frame);
-//							}
-//						}
-//						else {
 				lin_slcan_rx_handler(&open_lin_data_layer_frame);
-//						}
 				lin_slcan_reset();
 			}
 		}
@@ -252,4 +285,3 @@ void lin_slcan_monitor_rx(l_u8 rx_byte) {
 		}
 	}
 }
-

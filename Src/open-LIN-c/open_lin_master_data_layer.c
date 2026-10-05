@@ -46,6 +46,7 @@ void open_lin_master_dl_init(t_master_frame_table_item *p_master_frame_table, l_
 {
 	master_frame_table = p_master_frame_table;
 	master_frame_table_size = p_master_frame_table_size;
+	master_table_index = 0; /* sonst zeigt der Index noch in die alte Tabelle */
 	open_lin_master_goto_idle(l_false);
 }
 
@@ -131,6 +132,10 @@ void open_lin_master_dl_handler(l_u8 ms_passed)
 			if ((master_table_item->offset_ms) < time_passed_since_last_frame_ms)
 			{
 				time_passed_since_last_frame_ms = 0;
+				/* Waehrend des Headers ist der Empfang aus, damit das ueber den
+				 * Transceiver zurueckgelesene Echo der eigenen Sendebytes nicht
+				 * als Antwort gezaehlt wird und kein ORE auflaeuft. */
+				open_lin_set_rx_enabled(false);
 				if (open_lin_master_data_tx_header(&master_table_item->slot) == l_true)
 				{
 					if (master_table_item->slot.frame_type == OPEN_LIN_FRAME_TYPE_TRANSMIT)
@@ -140,6 +145,8 @@ void open_lin_master_dl_handler(l_u8 ms_passed)
 					{
 						lin_master_state = OPEN_LIN_MASTER_DATA_RX;
 						master_rx_count = 0;
+						/* sofort scharf machen: die Antwort kann direkt nach dem
+						 * Stoppbit des PID beginnen */
 						open_lin_set_rx_enabled(true);
 					}
 				} else
@@ -156,16 +163,26 @@ void open_lin_master_dl_handler(l_u8 ms_passed)
 		{
 			case OPEN_LIN_MASTER_IDLE:
 			{
-				open_lin_set_rx_enabled(false);
-				/* do nothing */
+				/* Empfang wird gezielt vor jedem Header abgeschaltet,
+				 * nicht mehr in jedem Millisekunden-Tick. */
 				break;
 			}
 			case OPEN_LIN_MASTER_DATA_RX:
 			{
 				if (time_passed_since_last_frame_ms > master_table_item->response_wait_ms)
 				{
-					open_lin_error_handler(OPEN_LIN_MASTER_ERROR_DATA_RX_TIMEOUT);
-					open_lin_master_goto_idle(l_true);
+					/* Dieser Handler laeuft jetzt in der Mainloop, open_lin_master_dl_rx()
+					 * dagegen in der USART1-ISR und kann das Frame genau jetzt fertig
+					 * machen. Erst den Empfang stilllegen (danach kann kein RX-Interrupt
+					 * mehr kommen), dann den Zustand pruefen - sonst laeuft
+					 * open_lin_master_goto_idle() zweimal und der Tabellenindex
+					 * ueberspringt einen Eintrag. */
+					open_lin_set_rx_enabled(l_false);
+					if (lin_master_state == OPEN_LIN_MASTER_DATA_RX)
+					{
+						open_lin_error_handler(OPEN_LIN_MASTER_ERROR_DATA_RX_TIMEOUT);
+						open_lin_master_goto_idle(l_true);
+					}
 				} else
 				{
 					/*data reception handled by open_lin_master_data_layer_rx, timeout handled here*/

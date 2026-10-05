@@ -23,14 +23,20 @@
 #define SLCAN_STATE_CONFIG 0
 #define SLCAN_STATE_OPEN 2
 
-extern uint8_t slcan_state;
+/* wird in der Mainloop geschrieben und in ISRs gelesen */
+extern volatile uint8_t slcan_state;
 
-void slcanClose();
 uint8_t slcanReciveCanFrame(open_lin_frame_slot_t *pRxMsg);
-uint8_t slcanReciveCanFrameWithCS(open_lin_frame_slot_t *pRxMsg, uint8_t cs);
 int slCanProccesInput(uint8_t ch);
-void slCanCheckCommand();
 void slCanHandler(uint8_t time_passed_ms);
+
+/* --- Mainloop --- */
+void slCanCheckCommand(void);   /* USB-Kommandos einlesen und ausfuehren */
+void slCanServiceLin(void);     /* LIN-Master-Schedule und Empfangs-Timeout */
+void slCanOutputPump(void);     /* ein USB-Paket aus dem Sendering absenden */
+
+/* --- Interrupt --- */
+void slCanTickIsr(void);        /* aus SysTick_Handler, zaehlt nur */
 
 uint8_t parseHex(uint8_t* line, uint8_t len, uint32_t* value) ;
 
@@ -40,7 +46,7 @@ typedef enum {
 	LIN_SLAVE
 } LinType_t ;
 
-extern LinType_t lin_type;
+extern volatile LinType_t lin_type;
 
 
 #endif /* SLCAN_H_ */

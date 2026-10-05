@@ -107,7 +107,9 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-	  slCanCheckCommand();
+	  slCanCheckCommand();   /* USB-Kommandos einlesen und ausfuehren */
+	  slCanServiceLin();     /* LIN-Master-Schedule + Empfangs-Timeout    */
+	  slCanOutputPump();     /* ein USB-Paket aus dem Sendering absenden  */
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
@@ -160,7 +162,6 @@ void SystemClock_Config(void)
 
 /* USER CODE BEGIN 4 */
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart){
-	extern LinType_t lin_type;
 	uint8_t rbyte = Uart2RxFifo;
 	if (slcan_state == SLCAN_STATE_OPEN)
 	{
@@ -171,6 +172,7 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart){
 			break;
 		case LIN_SLAVE:
 			open_lin_slave_rx_header(rbyte);
+			break;
 		default: /* Monitor */
 			lin_slcan_monitor_rx(rbyte);
 			break;
@@ -181,7 +183,18 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart){
 
 void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
 {
-
+	/* Fehler quittieren und den Empfang wieder scharf machen.
+	 * Die HAL behandelt ORE als "blocking error" und bricht dabei den
+	 * laufenden HAL_UART_Receive_IT ab (UART_EndRxTransfer). Ohne das
+	 * Neuarmieren hier bleibt der LIN-Empfang danach dauerhaft stehen. */
+	__HAL_UART_CLEAR_FLAG(huart,
+			UART_CLEAR_OREF | UART_CLEAR_FEF | UART_CLEAR_NEF | UART_CLEAR_PEF);
+	huart->ErrorCode = HAL_UART_ERROR_NONE;
+	if (huart->RxState != HAL_UART_STATE_BUSY_RX)
+	{
+		huart->RxState = HAL_UART_STATE_READY;
+		(void) HAL_UART_Receive_IT(huart, &Uart2RxFifo, 1);
+	}
 }
 
 /* USER CODE END 4 */
