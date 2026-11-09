@@ -2,6 +2,40 @@
 
 It is a more comprehensive fork of https://github.com/uCAN-LIN/LinUSBConverter
 
+## Firmware 4.0 – neues Host-Protokoll (LUC-LIN P1)
+
+Ab Firmware 4.0 spricht der Adapter ein eigenes, sauberes ASCII-Protokoll
+statt der SLCAN-artigen Syntax. Beschreibung: [docs/PROTOKOLL.md](docs/PROTOKOLL.md)
+
+| Modus | Funktion |
+|---|---|
+| `MASTER` | Schedule senden, Antworten empfangen, eigene PUB-Frames beantworten |
+| `SLAVE` | auf Header antworten (Daten atomar per `DATA` aktualisierbar) |
+| `MONITOR` | mithören, Einmal-Frames senden (`SEND`) |
+| `DIAG` | Diagnose 3C/3D mit Transportschicht (`DREQ`, SF/FF/CF, response pending) |
+
+Firmware-Aufbau:
+
+| Datei | Inhalt |
+|---|---|
+| `Src/luc_lin.c` | LIN-Engine: eine Empfangs-Statemachine für alle Modi, echo-gesteuertes Senden (Bitfehler-/Kollisionserkennung), Schedule, Diagnose |
+| `Src/luc_proto.c` | ASCII-Protokoll (Parser, Ausgabe ohne printf) |
+| `Src/luc_port_stm32.c` | STM32F042: USART1-Interrupt (Break + RXNE), USB-Ringpuffer, µs-Zeitbasis |
+| `Inc/luc_port.h` | Hardware-Schnittstelle des Kerns |
+
+Die bisherigen Quellen (`slcan.c`, `lin_slcan.c`, `open-LIN-c/`) sind im
+CubeIDE-Projekt vom Build ausgeschlossen.
+
+Werkzeuge:
+
+- `host/python/` – Python-Bibliothek `luclin`, GUI **LUC-LIN Studio** (`luclin_gui.py`), Beispiele, Tests
+- `tools/sim/` – Firmware-Kern auf dem PC mit virtuellem LIN-Bus (Pseudo-Terminal statt COM-Port)
+- `tools/arm/` – Kommandozeilen-Build (`make -C tools/arm -f build.mk`, arm-none-eabi-gcc)
+
+---
+
+## Bis Firmware 3.x (SLCAN-artiges Protokoll)
+
 ## Common Enhancements
 
 Enhanced checksum ID = 0x00 - 0x3f<br>

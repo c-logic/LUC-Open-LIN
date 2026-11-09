@@ -24,9 +24,9 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-#include "slcan.h"
-#include "lin_slcan.h"
-#include "open_lin_master_data_layer.h"
+#include "luc_lin.h"
+#include "luc_proto.h"
+#include "luc_port_stm32.h"
 
 /* USER CODE END Includes */
 
@@ -59,11 +59,7 @@ void SystemClock_Config(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-const uint32_t *uid = (uint32_t *)(UID_BASE);
-uint32_t serialNumber = 0;
-uint8_t Uart2RxFifo;
-uint32_t lin_baund_rate = 19200;
-#define UART_RX_FIFO_SIZE 1
+uint32_t lin_baund_rate = 19200;   /* von MX_USART1_UART_Init verwendet */
 /* USER CODE END 0 */
 
 /**
@@ -98,18 +94,18 @@ int main(void)
   MX_USART1_UART_Init();
   MX_USB_DEVICE_Init();
   /* USER CODE BEGIN 2 */
-  HAL_UART_Receive_IT(&huart1, &Uart2RxFifo, UART_RX_FIFO_SIZE);
-//  HAL_NVIC_SetPriority(USART1_IRQn, 2, 0);
-  NVIC_EnableIRQ(USART1_IRQn);
+  luc_lin_init();      /* stellt auch die Baudrate ein */
+  luc_proto_init();
+  luc_port_init();     /* USART1-Interrupts (Break, RXNE) */
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-	  slCanCheckCommand();   /* USB-Kommandos einlesen und ausfuehren */
-	  slCanServiceLin();     /* LIN-Master-Schedule + Empfangs-Timeout    */
-	  slCanOutputPump();     /* ein USB-Paket aus dem Sendering absenden  */
+	  luc_lin_poll();        /* Schedule, Diagnose, Timeouts             */
+	  luc_proto_poll();      /* Befehle ausfuehren, Ereignisse ausgeben  */
+	  luc_port_usb_pump();   /* ein USB-Paket aus dem Sendering absenden */
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
@@ -161,42 +157,6 @@ void SystemClock_Config(void)
 }
 
 /* USER CODE BEGIN 4 */
-void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart){
-	uint8_t rbyte = Uart2RxFifo;
-	if (slcan_state == SLCAN_STATE_OPEN)
-	{
-		switch (lin_type)
-		{
-		case LIN_MASTER:
-			open_lin_master_dl_rx(rbyte);
-			break;
-		case LIN_SLAVE:
-			open_lin_slave_rx_header(rbyte);
-			break;
-		default: /* Monitor */
-			lin_slcan_monitor_rx(rbyte);
-			break;
-		}
-	}
-	HAL_UART_Receive_IT(huart, &Uart2RxFifo, 1);
-}
-
-void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
-{
-	/* Fehler quittieren und den Empfang wieder scharf machen.
-	 * Die HAL behandelt ORE als "blocking error" und bricht dabei den
-	 * laufenden HAL_UART_Receive_IT ab (UART_EndRxTransfer). Ohne das
-	 * Neuarmieren hier bleibt der LIN-Empfang danach dauerhaft stehen. */
-	__HAL_UART_CLEAR_FLAG(huart,
-			UART_CLEAR_OREF | UART_CLEAR_FEF | UART_CLEAR_NEF | UART_CLEAR_PEF);
-	huart->ErrorCode = HAL_UART_ERROR_NONE;
-	if (huart->RxState != HAL_UART_STATE_BUSY_RX)
-	{
-		huart->RxState = HAL_UART_STATE_READY;
-		(void) HAL_UART_Receive_IT(huart, &Uart2RxFifo, 1);
-	}
-}
-
 /* USER CODE END 4 */
 
 /**

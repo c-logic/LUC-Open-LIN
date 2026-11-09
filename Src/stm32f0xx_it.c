@@ -22,9 +22,7 @@
 #include "stm32f0xx_it.h"
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-#include <open_lin_slave_data_layer.h>
-#include "slcan.h"
-#include "lin_slcan.h"
+#include "luc_port_stm32.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -133,10 +131,6 @@ void SysTick_Handler(void)
   /* USER CODE END SysTick_IRQn 0 */
   HAL_IncTick();
   /* USER CODE BEGIN SysTick_IRQn 1 */
-  /* Hier wird nur gezaehlt. Der LIN-Master-Schedule und der Empfangs-Timeout
-   * laufen in slCanServiceLin() in der Mainloop - sonst blockiert das
-   * blockierende HAL_UART_Transmit den Tick, den UART-Empfang und den USB. */
-  slCanTickIsr();
   /* USER CODE END SysTick_IRQn 1 */
 }
 
@@ -153,6 +147,9 @@ void SysTick_Handler(void)
 void USART1_IRQHandler(void)
 {
   /* USER CODE BEGIN USART1_IRQn 0 */
+  /* LUC-LIN: eigener Handler (Break + Byteempfang), HAL wird nicht benutzt */
+  luc_port_usart1_irq();
+  return;
 
   /* USER CODE END USART1_IRQn 0 */
   HAL_UART_IRQHandler(&huart1);
