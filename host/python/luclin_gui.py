@@ -543,7 +543,8 @@ class Studio(tk.Tk):
         e.pack(side="left", fill="x", expand=True)
         e.bind("<Return>", lambda ev: self._con_send())
         ttk.Button(ent_f, text="Senden", style="Accent.TButton", command=self._con_send).pack(side="left", padx=6)
-        ttk.Label(tab, text="Befehle siehe HELP bzw. docs/PROTOKOLL.md", style="Muted.TLabel").pack(anchor="w")
+        ttk.Label(tab, text="HELP zeigt alle Befehle, HELP <befehl> die Details (z.B. HELP FRAME, HELP F)",
+                  style="Muted.TLabel").pack(anchor="w")
 
     # ------------------------------------------------------------------ #
     # Verbindung
@@ -864,7 +865,8 @@ class Studio(tk.Tk):
         for fid in sorted(self.frames):
             f = self.frames[fid]
             self.ft.insert("", "end", iid=str(fid), values=(
-                f"{fid:02X}", f["dir"], f["len"], "classic" if f["classic"] else "enhanced",
+                f"{fid:02X}", f["dir"] + (" · bereit" if f.get("armed") else ""), f["len"],
+                "classic" if f["classic"] else "enhanced",
                 hexs(f["data"]) if f["dir"] != "SUB" and f["data"] else "—"))
         if sel and self.ft.exists(sel[0]):
             self.ft.selection_set(sel[0])
@@ -930,7 +932,8 @@ class Studio(tk.Tk):
         tab = self._cmd(lambda d: d.frames_table())
         if tab is None:
             return
-        self.frames = {t["id"]: dict(dir=t["dir"], len=t["len"], classic=t["classic"], data=t["data"])
+        self.frames = {t["id"]: dict(dir=t["dir"], len=t["len"], classic=t["classic"], data=t["data"],
+                            armed=t.get("armed", False))
                        for t in tab}
         self._frames_refresh()
 
@@ -1248,7 +1251,8 @@ class Studio(tk.Tk):
         if r is None:
             return
         tab, sched, opts, baud = r
-        self.frames = {t["id"]: dict(dir=t["dir"], len=t["len"], classic=t["classic"], data=t["data"])
+        self.frames = {t["id"]: dict(dir=t["dir"], len=t["len"], classic=t["classic"], data=t["data"],
+                            armed=t.get("armed", False))
                        for t in tab}
         self.sched = [list(e) for e in sched]
         self.opts = opts

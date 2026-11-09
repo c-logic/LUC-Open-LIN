@@ -467,6 +467,124 @@ static void cmd_stat(void)
 	o_end();
 }
 
+/* ------------------------------------------------------------------------ */
+/* Hilfe (liegt komplett im Flash, jede Zeile wird mit '=' ausgegeben)       */
+/* ------------------------------------------------------------------------ */
+static const char *const help_txt[] = {
+	"VER SN RESET STAT HELP [befehl]",
+	"BAUD [n]  MODE [OFF|MASTER|SLAVE|MONITOR|DIAG]",
+	"FRAME id PUB|ONCE|SUB len [E|C] [data]",
+	"DATA id data  DEL id|*  LIST",
+	"SCHED id[/ms] ...|?|-  SEND id [E|C] [data]",
+	"WAKE SLEEP DREQ nad data  OPT [name val]",
+	"Details: HELP <befehl>   Ausgaben: HELP F, HELP D",
+	0
+};
+static const char *const h_mode[] = {
+	"MODE [m]  Betriebsart setzen/abfragen",
+	" OFF      Bus passiv",
+	" MASTER   Header nach Schedule, Antworten melden",
+	" SLAVE    auf Header antworten (PUB/ONCE)",
+	" MONITOR  nur mithoeren, SEND/WAKE erlaubt",
+	" DIAG     Master nur fuer DREQ und SEND",
+	0
+};
+static const char *const h_baud[] = {
+	"BAUD [n]  LIN-Baudrate 1000..115200, Default 19200",
+	" ohne Argument: abfragen. Bricht laufenden Frame ab.",
+	0
+};
+static const char *const h_frame[] = {
+	"FRAME id dir len [E|C] [data]  Frame definieren",
+	" id 00..3F (hex), len 1..8",
+	" PUB  Adapter liefert die Antwort",
+	" ONCE wie PUB, aber nur einmal je DATA",
+	" SUB  Antwort von anderem Knoten (Laenge/Checksumme)",
+	" E enhanced (Default), C classic; 3C/3D immer classic",
+	" fehlende Datenbytes = 00",
+	0
+};
+static const char *const h_data[] = {
+	"DATA id data  Daten von PUB/ONCE atomar ersetzen",
+	" genau len Bytes, z.B. DATA 21 510005DC00140400",
+	" ONCE: Antwort scharf schalten (LIST zeigt ARMED)",
+	0
+};
+static const char *const h_list[] = {
+	"LIST  Frame-Tabelle: =FRAME id dir len E|C data [ARMED]",
+	"DEL id | DEL *  Frame bzw. alle Frames loeschen",
+	0
+};
+static const char *const h_sched[] = {
+	"SCHED id[/ms] ...  Master-Schedule ersetzen (max. 32)",
+	" ms = Slotzeit, Default: max. Framezeit + Reserve",
+	" SCHED ?  auslesen    SCHED -  leeren",
+	0
+};
+static const char *const h_send[] = {
+	"SEND id [E|C] [data]  Einmal-Frame (MASTER/MONITOR/DIAG)",
+	" ohne data: nur Header, Antwort kommt vom Bus",
+	" mit data:  kompletter Frame vom Adapter",
+	" Ergebnis als !F, auch bei ECHO=0",
+	"SLEEP  Go-to-Sleep (3C 00 FF..)    WAKE  Wakeup-Puls",
+	0
+};
+static const char *const h_dreq[] = {
+	"DREQ nad data  Diagnose-Request (MASTER/DIAG)",
+	" data = SID + Parameter, 1..40 Bytes; NAD 7F = alle",
+	" 3C als SF bzw. FF/CF, danach 3D-Polling im DSLOT-Abstand",
+	" 7F sid 78 (response pending) verlaengert auf 5 s",
+	" Ergebnis: !D nad OK data | NRC sid nrc | TO",
+	0
+};
+static const char *const h_opt[] = {
+	"OPT [name wert]  Optionen anzeigen/setzen (Default)",
+	" ECHO 0|1    eigene Antworten melden (1)",
+	" ALL 0|1     nicht definierte IDs melden (1)",
+	" NR 0|1      Header ohne Antwort melden (1)",
+	" STRICT 0|1  Checksummenart muss zu FRAME passen (0)",
+	" TIMING 0|1  Zeitwerte an !F anhaengen (0)",
+	" DSLOT ms    Abstand Diagnose-Frames (10)",
+	" P2 ms       Diagnose-Timeout (1000)",
+	0
+};
+static const char *const h_stat[] = {
+	"STAT   FR=gemeldete Frames ERR=Busfehler OVR=verlorene Ereignisse",
+	"VER    Firmware- und Protokollversion   SN  Seriennummer",
+	"RESET  Modus OFF, Tabellen leer, Defaults",
+	0
+};
+static const char *const h_f[] = {
+	"!F t_us id src len data cs st [H R I F]",
+	" src: T gesendet, R empfangen, - keine Antwort",
+	" st:  E/C ok (enhanced/classic), CS Checksumme,",
+	"      NR keine Antwort, TO unvollstaendig, BIT Bitfehler",
+	" TIMING (us): H Header, R Antwortpause,",
+	"      I max. Byte-Pause, F Framedauer",
+	0
+};
+static const char *const h_d[] = {
+	"!D nad OK data       Diagnose-Antwort (RSID + Daten)",
+	"!D nad NRC sid nrc   negative Antwort",
+	"!D nad TO            keine Antwort innerhalb P2",
+	"!E OVR n             n Ereignisse verloren",
+	0
+};
+
+static const struct {
+	const char *name;
+	const char *const *txt;
+} help_tab[] = {
+	{ "MODE", h_mode }, { "BAUD", h_baud }, { "FRAME", h_frame },
+	{ "DATA", h_data }, { "LIST", h_list }, { "DEL", h_list },
+	{ "SCHED", h_sched }, { "SEND", h_send }, { "SLEEP", h_send },
+	{ "WAKE", h_send }, { "DREQ", h_dreq }, { "OPT", h_opt },
+	{ "STAT", h_stat }, { "VER", h_stat }, { "SN", h_stat },
+	{ "RESET", h_stat }, { "F", h_f }, { "!F", h_f }, { "D", h_d },
+	{ "!D", h_d }, { "E", h_d }, { "!E", h_d },
+};
+static const char *const *job_help;
+
 static void execute(void)
 {
 	char *tok[TOK_MAX];
@@ -542,8 +660,23 @@ static void execute(void)
 	} else if (is_word(c0, "STAT")) {
 		cmd_stat();
 	} else if (is_word(c0, "HELP") || is_word(c0, "?")) {
-		job = JOB_HELP;
-		job_idx = 0;
+		uint8_t i;
+		job_help = help_txt;
+		if (ntok >= 2u) {
+			job_help = 0;
+			for (i = 0; i < sizeof(help_tab) / sizeof(help_tab[0]); i++) {
+				if (is_word(tok[1], help_tab[i].name)) {
+					job_help = help_tab[i].txt;
+					break;
+				}
+			}
+		}
+		if (job_help) {
+			job = JOB_HELP;
+			job_idx = 0;
+		} else {
+			err(LUC_E_RANGE);
+		}
 	} else {
 		err(LUC_E_UNKNOWN);
 	}
@@ -552,16 +685,6 @@ static void execute(void)
 /* ------------------------------------------------------------------------ */
 /* mehrzeilige Ausgaben                                                      */
 /* ------------------------------------------------------------------------ */
-static const char *const help_txt[] = {
-	"=VER SN RESET STAT HELP",
-	"=BAUD [n]  MODE [OFF|MASTER|SLAVE|MONITOR|DIAG]",
-	"=FRAME id PUB|ONCE|SUB len [E|C] [data]",
-	"=DATA id data  DEL id|*  LIST",
-	"=SCHED id[/ms] ...|?|-  SEND id [E|C] [data]",
-	"=WAKE SLEEP DREQ nad data  OPT [name val]",
-	"=OPT: ECHO ALL NR STRICT TIMING DSLOT P2",
-	0
-};
 
 static void job_step(void)
 {
@@ -581,6 +704,8 @@ static void job_step(void)
 			o_dec(f.len);
 			o_str(f.classic ? " C " : " E ");
 			o_hexbytes(f.data, f.len);
+			if (f.dir == LUC_DIR_ONCE && f.armed)
+				o_str(" ARMED");      /* Antwort liegt bereit, noch nicht abgeholt */
 			o_end();
 			job_cnt++;
 			return;
@@ -621,9 +746,9 @@ static void job_step(void)
 		o_end();
 		job = JOB_NONE;
 	} else if (job == JOB_HELP) {
-		if (help_txt[job_idx]) {
-			o_begin(help_txt[job_idx][0]);
-			o_str(help_txt[job_idx] + 1);
+		if (job_help[job_idx]) {
+			o_begin('=');
+			o_str(job_help[job_idx]);
 			o_end();
 			job_idx++;
 		} else {

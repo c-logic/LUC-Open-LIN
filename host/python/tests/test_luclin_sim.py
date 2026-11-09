@@ -58,6 +58,11 @@ def test_tables(sim):
     sim.frame(0x3D, "ONCE", 8)
     sim.frame(0x30, "SUB", 8, classic=True)
     t = {f["id"]: f for f in sim.frames_table()}
+    assert not t[0x3D]["armed"]
+    sim.data(0x3D, bytes(8))
+    assert {f["id"]: f for f in sim.frames_table()}[0x3D]["armed"]
+    info, _ = sim.command_lines("LIST")
+    assert any(line.startswith("FRAME 3D ONCE 8 C") and line.endswith(" ARMED") for line in info)
     assert t[0x21]["data"].hex() == "510005dc00140400"
     assert t[0x30]["classic"] and t[0x3D]["classic"]
     sim.data(0x21, b"\x01" * 8)
@@ -137,6 +142,7 @@ def test_slave(sim):
     assert all(f.data in (bytes.fromhex("510005DC00140400"), bytes.fromhex("810105DC00140400")) for f in f21)
     f3d = [f for f in got if f.id == 0x3D]
     assert len(f3d) == 1 and f3d[0].status == "C"
+    assert not {f["id"]: f for f in sim.frames_table()}[0x3D]["armed"]   # abgeholt
     assert not [f for f in got if f.id == 0x30]       # ALL=0
 
 
@@ -222,3 +228,14 @@ def test_frame_line_roundtrip():
     line = "!F 641601 23 - 0 - -- NR 1040 - - -"
     f = Frame.from_fields(line.split()[1:])
     assert f.gap_us is None and f.header_us == 1040 and f.to_line() == line
+
+
+def test_help(sim):
+    h = sim.help()
+    assert any("FRAME" in line for line in h) and any("HELP <befehl>" in line for line in h)
+    assert sim.help("frame")[0].startswith("FRAME id dir len")
+    assert any("Antwortpause" in line for line in sim.help("F"))
+    assert len(sim.help("OPT")) == 8
+    with pytest.raises(LucError) as e:
+        sim.help("XYZ")
+    assert e.value.code == 2

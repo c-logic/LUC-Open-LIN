@@ -65,7 +65,7 @@ Bytes gemischt.
 | `FRAME <id> <dir> <len> [E\|C] [data]` | `+OK` | Frame definieren/ersetzen. `dir` = `PUB` `ONCE` `SUB`, `len` 1…8, Checksumme `E` (enhanced, Default) oder `C` (classic; 3C/3D immer classic). Fehlende Datenbytes = 00 |
 | `DATA <id> <data>` | `+OK` | Daten eines PUB/ONCE-Frames atomar ersetzen (genau `len` Bytes). Bei ONCE: scharf schalten |
 | `DEL <id>` / `DEL *` | `+OK` | Frame bzw. alle Frames löschen |
-| `LIST` | `=FRAME …` je Frame, `+OK <anzahl>` | Tabelle auslesen (`=FRAME 21 PUB 8 E 510005DC00140400`) |
+| `LIST` | `=FRAME …` je Frame, `+OK <anzahl>` | Tabelle auslesen (`=FRAME 21 PUB 8 E 510005DC00140400`). ONCE-Frames, deren Antwort bereitliegt und noch nicht abgeholt wurde, tragen am Ende `ARMED` |
 | `SCHED <id>[/ms] …` | `+OK <anzahl>` | Schedule ersetzen (max. 32 Einträge). Slotzeit in ms, Default = max. Framezeit + 1 ms |
 | `SCHED ?` | `=SCHED 21/20 …`, `+OK` | Schedule auslesen |
 | `SCHED -` | `+OK 0` | Schedule leeren |
@@ -76,7 +76,7 @@ Bytes gemischt.
 | `OPT` | `+OK ECHO=1 ALL=1 NR=1 STRICT=0 TIMING=0 DSLOT=10 P2=1000` | Optionen anzeigen |
 | `OPT <name> <wert>` | `+OK` | Option setzen (siehe unten) |
 | `STAT` | `+OK FR=<n> ERR=<n> OVR=<n>` | Zähler: gemeldete Frames, Busfehler, verlorene Ereignisse |
-| `HELP` | `=…`, `+OK` | Kurzübersicht |
+| `HELP [befehl]` | `=…`, `+OK` | Kurzübersicht bzw. Details zu einem Befehl (`HELP FRAME`, `HELP OPT`); `HELP F` / `HELP D` erklären die Ereignisse |
 
 ### Optionen
 

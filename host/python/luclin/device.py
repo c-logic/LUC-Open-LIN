@@ -350,6 +350,10 @@ class LucLin:
     def reset(self):
         self.command("RESET")
 
+    def help(self, topic: str | None = None) -> list[str]:
+        """Hilfetext des Adapters (Uebersicht oder zu einem Befehl, z.B. 'FRAME', 'F')."""
+        return self.command_lines("HELP" + (f" {topic}" if topic else ""))[0]
+
     @property
     def baud(self) -> int:
         return int(self.command("BAUD"))
@@ -393,7 +397,8 @@ class LucLin:
             p = line.split()
             if p and p[0] == "FRAME":
                 res.append(dict(id=int(p[1], 16), dir=p[2], len=int(p[3]),
-                                classic=p[4] == "C", data=bytes.fromhex(p[5])))
+                                classic=p[4] == "C", data=bytes.fromhex(p[5]),
+                                armed=len(p) > 6 and p[6] == "ARMED"))
         return res
 
     # Schedule ----------------------------------------------------------
